@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using RcKlubbApp.Server.Data;
 using RcKlubbApp.Server.Media;
+using RcKlubbApp.Server.Membership;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -26,6 +27,7 @@ builder.Services.AddAuthorizationBuilder()
 builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(options =>
     options.MultipartBodyLengthLimit = 8 * 1024 * 1024);
 builder.Services.AddSingleton<MediaLibraryStore>();
+builder.Services.AddSingleton<MembershipApplicationStore>();
 
 var app = builder.Build();
 
@@ -45,7 +47,8 @@ auth.MapIdentityApi<IdentityUser>();
 auth.MapGet("/me", async (HttpContext context, UserManager<IdentityUser> users) =>
 {
     var user = await users.GetUserAsync(context.User);
-    return user is null ? Results.Unauthorized() : Results.Ok(new { user.Email, roles = await users.GetRolesAsync(user) });
+    if (user is null) return Results.Unauthorized();
+    return Results.Ok(new { user.Email, roles = await users.GetRolesAsync(user) });
 }).RequireAuthorization();
 
 var uploadsDirectory = Path.Combine(app.Environment.WebRootPath, "uploads");
@@ -58,11 +61,94 @@ app.MapGet("/api/media/placements/{placement}", async (string placement, MediaLi
     var image = library.Images.FirstOrDefault(item => item.Id == imageId);
     return image is null ? Results.NotFound() : Results.Ok(new
     {
-        image.Id,
-        image.Title,
-        image.AltText,
+        image.Id, image.Title, image.AltText,
         url = $"/uploads/{Uri.EscapeDataString(image.FileName)}"
     });
+});
+
+app.MapPost("/api/membership-applications", async (CreateMembershipApplication request, MembershipApplicationStore store, CancellationToken cancellationToken) =>
+{
+    var name = request.FullName?.Trim() ?? "";
+    var email = request.Email?.Trim().ToLowerInvariant() ?? "";
+    var phone = request.Phone?.Trim() ?? "";
+    var streetAddress = request.StreetAddress?.Trim() ?? "";
+    var postalCode = request.PostalCode?.Trim() ?? "";
+    var city = request.City?.Trim() ?? "";
+    if (!request.PrivacyAccepted) return Results.BadRequest(new { message = "Du må godta personvernerklæringen." });
+    if (name.Length is < 2 or > 120) return Results.BadRequest(new { message = "Oppgi et gyldig navn." });
+    if (email.Length > 200 || !new System.ComponentModel.DataAnnotations.EmailAddressAttribute().IsValid(email))
+        return Results.BadRequest(new { message = "Oppgi en gyldig e-postadresse." });
+    if (phone.Length is < 5 or > 30) return Results.BadRequest(new { message = "Oppgi et gyldig telefonnummer." });
+    if (streetAddress.Length is < 3 or > 150) return Results.BadRequest(new { message = "Oppgi en gyldig gateadresse." });
+    if (postalCode.Length != 4 || postalCode.Any(character => !char.IsDigit(character)))
+        return Results.BadRequest(new { message = "Postnummer må bestå av fire sifre." });
+    if (city.Length is < 2 or > 100) return Results.BadRequest(new { message = "Oppgi et gyldig poststed." });
+    if (request.BirthDate is not null &&
+        (request.BirthDate < new DateOnly(1920, 1, 1) || request.BirthDate > DateOnly.FromDateTime(DateTime.UtcNow)))
+        return Results.BadRequest(new { message = "Fødselsdatoen er ugyldig." });
+    if ((request.Message?.Length ?? 0) > 1500) return Results.BadRequest(new { message = "Meldingen er for lang." });
+
+    var application = await store.UpdateAsync(applications =>
+    {
+        if (applications.Any(item => item.Email == email && item.Status == "Pending")) return null;
+        var item = new MembershipApplication(
+            Guid.NewGuid(), name, email, phone, request.BirthDate?.Year,
+            request.Experience?.Trim() ?? "Ikke oppgitt", request.Message?.Trim() ?? "",
+            "Pending", DateTimeOffset.UtcNow, null, null)
+        {
+            BirthDate = request.BirthDate,
+            StreetAddress = streetAddress,
+            PostalCode = postalCode,
+            City = city
+        };
+        applications.Add(item);
+        return item;
+    }, cancellationToken);
+    return application is null
+        ? Results.Conflict(new { message = "Det finnes allerede en søknad som venter for denne e-postadressen." })
+        : Results.Created($"/api/membership-applications/{application.Id}", new { application.Id, application.Status });
+});
+
+var membershipAdmin = app.MapGroup("/api/admin/membership-applications").RequireAuthorization("AdminOnly");
+membershipAdmin.MapGet("/", async (MembershipApplicationStore store, CancellationToken cancellationToken) =>
+    Results.Ok((await store.ReadAsync(cancellationToken)).OrderByDescending(item => item.SubmittedAt)));
+membershipAdmin.MapPut("/{id:guid}", async (Guid id, ReviewMembershipApplication request, MembershipApplicationStore store, CancellationToken cancellationToken) =>
+{
+    if (request.Status is not ("Approved" or "Rejected"))
+        return Results.BadRequest(new { message = "Ugyldig status." });
+    var updated = await store.UpdateAsync(applications =>
+    {
+        var index = applications.FindIndex(item => item.Id == id);
+        if (index < 0) return null;
+        var next = applications[index] with
+        {
+            Status = request.Status,
+            AdminComment = request.AdminComment?.Trim(),
+            ReviewedAt = DateTimeOffset.UtcNow
+        };
+        applications[index] = next;
+        return next;
+    }, cancellationToken);
+    return updated is null ? Results.NotFound() : Results.Ok(updated);
+});
+membershipAdmin.MapPut("/{id:guid}/payment", async (Guid id, RegisterMembershipPayment request, MembershipApplicationStore store, CancellationToken cancellationToken) =>
+{
+    var year = DateTime.UtcNow.Year;
+    var updated = await store.UpdateAsync(applications =>
+    {
+        var index = applications.FindIndex(item => item.Id == id);
+        if (index < 0) return null;
+        var current = applications[index];
+        if (current.Status != "Approved") return null;
+        var next = current with
+        {
+            PaymentYear = request.Paid ? year : null,
+            PaidAt = request.Paid ? DateTimeOffset.UtcNow : null
+        };
+        applications[index] = next;
+        return next;
+    }, cancellationToken);
+    return updated is null ? Results.NotFound() : Results.Ok(updated);
 });
 
 var mediaAdmin = app.MapGroup("/api/admin/media").RequireAuthorization("AdminOnly");
@@ -72,12 +158,7 @@ mediaAdmin.MapGet("/", async (MediaLibraryStore store, CancellationToken cancell
     var library = await store.ReadAsync(cancellationToken);
     return Results.Ok(library.Images.OrderByDescending(image => image.UploadedAt).Select(image => new
     {
-        image.Id,
-        image.FileName,
-        image.Title,
-        image.AltText,
-        image.Size,
-        image.UploadedAt,
+        image.Id, image.FileName, image.Title, image.AltText, image.Size, image.UploadedAt,
         url = $"/uploads/{Uri.EscapeDataString(image.FileName)}",
         placements = library.Placements.Where(pair => pair.Value == image.Id).Select(pair => pair.Key)
     }));
@@ -135,7 +216,7 @@ mediaAdmin.MapPut("/placements/{placement}", async (string placement, AssignMedi
     var assigned = await store.UpdateAsync(library =>
     {
         if (request.ImageId is null) { library.Placements.Remove(placement); return true; }
-        if (library.Images.All(image => image.Id != request.ImageId)) return false;
+        if (!library.Images.Any(image => image.Id == request.ImageId)) return false;
         library.Placements[placement] = request.ImageId.Value;
         return true;
     }, cancellationToken);
@@ -163,12 +244,7 @@ app.Run();
 
 static object ToMediaResponse(MediaItem image) => new
 {
-    image.Id,
-    image.FileName,
-    image.Title,
-    image.AltText,
-    image.Size,
-    image.UploadedAt,
+    image.Id, image.FileName, image.Title, image.AltText, image.Size, image.UploadedAt,
     url = $"/uploads/{Uri.EscapeDataString(image.FileName)}",
     placements = Array.Empty<string>()
 };
