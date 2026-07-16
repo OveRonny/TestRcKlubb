@@ -6,6 +6,8 @@ import EventsPage from './pages/EventsPage';
 import LoginPage from './pages/LoginPage';
 import AdminImagesPage from './pages/AdminImagesPage';
 import ProtectedAdminRoute from './components/ProtectedAdminRoute';
+import MembershipPage from './pages/MembershipPage';
+import AdminApplicationsPage from './pages/AdminApplicationsPage';
 
 function App() {
   return (
@@ -16,10 +18,11 @@ function App() {
         <Route path="arrangement" element={<EventsPage />} />
         <Route path="banen" element={<ContentPage eyebrow="Meldal RC-bane" title="Banen" description="Her finner du informasjon om banen, åpningstider, regler og hvordan du finner fram." />} />
         <Route path="kontakt" element={<ContentPage eyebrow="Ta kontakt" title="Kontakt oss" description="Har du spørsmål om klubben, medlemskap eller aktiviteter? Vi hjelper deg gjerne." />} />
-        <Route path="bli-medlem" element={<ContentPage eyebrow="Bli en del av miljøet" title="Bli medlem" description="Som medlem får du tilgang til klubbens aktiviteter, bane og et inkluderende RC-miljø." />} />
+        <Route path="bli-medlem" element={<MembershipPage />} />
         <Route path="medlem/login" element={<LoginPage />} />
         <Route element={<ProtectedAdminRoute />}>
           <Route path="admin/bilder" element={<AdminImagesPage />} />
+          <Route path="admin/medlemsoknader" element={<AdminApplicationsPage />} />
         </Route>
         <Route path="*" element={<ContentPage eyebrow="404" title="Siden finnes ikke" description="Siden du leter etter er flyttet eller finnes ikke." />} />
       </Route>
