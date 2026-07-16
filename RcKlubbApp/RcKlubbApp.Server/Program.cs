@@ -1,0 +1,227 @@
+using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
+using RcKlubbApp.Server.Data;
+using RcKlubbApp.Server.Media;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.AddServiceDefaults();
+builder.Services.AddOpenApi();
+builder.Services.AddDbContext<ApplicationDbContext>(options =>
+    options.UseSqlite(builder.Configuration.GetConnectionString("Identity") ?? "Data Source=rcklubb-identity.db"));
+builder.Services
+    .AddIdentityApiEndpoints<IdentityUser>(options =>
+    {
+        options.Password.RequiredLength = 12;
+        options.Password.RequireUppercase = true;
+        options.Password.RequireLowercase = true;
+        options.Password.RequireDigit = true;
+        options.Password.RequireNonAlphanumeric = true;
+        options.User.RequireUniqueEmail = true;
+    })
+    .AddRoles<IdentityRole>()
+    .AddEntityFrameworkStores<ApplicationDbContext>();
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("AdminOnly", policy => policy.RequireRole("Admin"));
+builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(options =>
+    options.MultipartBodyLengthLimit = 8 * 1024 * 1024);
+builder.Services.AddSingleton<MediaLibraryStore>();
+
+var app = builder.Build();
+
+app.MapDefaultEndpoints();
+app.UseDefaultFiles();
+app.UseStaticFiles();
+app.MapStaticAssets();
+if (app.Environment.IsDevelopment()) app.MapOpenApi();
+app.UseHttpsRedirection();
+app.UseAuthentication();
+app.UseAuthorization();
+
+await SeedIdentityAsync(app.Services, app.Configuration);
+
+var auth = app.MapGroup("/api/auth");
+auth.MapIdentityApi<IdentityUser>();
+auth.MapGet("/me", async (HttpContext context, UserManager<IdentityUser> users) =>
+{
+    var user = await users.GetUserAsync(context.User);
+    return user is null ? Results.Unauthorized() : Results.Ok(new { user.Email, roles = await users.GetRolesAsync(user) });
+}).RequireAuthorization();
+
+var uploadsDirectory = Path.Combine(app.Environment.WebRootPath, "uploads");
+Directory.CreateDirectory(uploadsDirectory);
+
+app.MapGet("/api/media/placements/{placement}", async (string placement, MediaLibraryStore store, CancellationToken cancellationToken) =>
+{
+    var library = await store.ReadAsync(cancellationToken);
+    if (!library.Placements.TryGetValue(placement, out var imageId)) return Results.NotFound();
+    var image = library.Images.FirstOrDefault(item => item.Id == imageId);
+    return image is null ? Results.NotFound() : Results.Ok(new
+    {
+        image.Id,
+        image.Title,
+        image.AltText,
+        url = $"/uploads/{Uri.EscapeDataString(image.FileName)}"
+    });
+});
+
+var mediaAdmin = app.MapGroup("/api/admin/media").RequireAuthorization("AdminOnly");
+
+mediaAdmin.MapGet("/", async (MediaLibraryStore store, CancellationToken cancellationToken) =>
+{
+    var library = await store.ReadAsync(cancellationToken);
+    return Results.Ok(library.Images.OrderByDescending(image => image.UploadedAt).Select(image => new
+    {
+        image.Id,
+        image.FileName,
+        image.Title,
+        image.AltText,
+        image.Size,
+        image.UploadedAt,
+        url = $"/uploads/{Uri.EscapeDataString(image.FileName)}",
+        placements = library.Placements.Where(pair => pair.Value == image.Id).Select(pair => pair.Key)
+    }));
+});
+
+mediaAdmin.MapPost("/", async (IFormFile image, MediaLibraryStore store, CancellationToken cancellationToken) =>
+{
+    var validation = await ValidateImageAsync(image, cancellationToken);
+    if (validation.Error is not null) return Results.BadRequest(new { message = validation.Error });
+    var id = Guid.NewGuid();
+    var fileName = $"{id:N}{validation.Extension}";
+    await SaveImageAsync(image, Path.Combine(uploadsDirectory, fileName), cancellationToken);
+    var item = new MediaItem(id, fileName, Path.GetFileNameWithoutExtension(image.FileName), "", image.Length, DateTimeOffset.UtcNow);
+    await store.UpdateAsync(library => { library.Images.Add(item); return item; }, cancellationToken);
+    return Results.Created($"/uploads/{fileName}", ToMediaResponse(item));
+}).DisableAntiforgery();
+
+mediaAdmin.MapPut("/{id:guid}", async (Guid id, UpdateMediaRequest request, MediaLibraryStore store, CancellationToken cancellationToken) =>
+{
+    var updated = await store.UpdateAsync(library =>
+    {
+        var index = library.Images.FindIndex(image => image.Id == id);
+        if (index < 0) return null;
+        var current = library.Images[index];
+        var next = current with { Title = request.Title.Trim(), AltText = request.AltText.Trim() };
+        library.Images[index] = next;
+        return next;
+    }, cancellationToken);
+    return updated is null ? Results.NotFound() : Results.Ok(ToMediaResponse(updated));
+});
+
+mediaAdmin.MapPut("/{id:guid}/file", async (Guid id, IFormFile image, MediaLibraryStore store, CancellationToken cancellationToken) =>
+{
+    var validation = await ValidateImageAsync(image, cancellationToken);
+    if (validation.Error is not null) return Results.BadRequest(new { message = validation.Error });
+    var library = await store.ReadAsync(cancellationToken);
+    var current = library.Images.FirstOrDefault(item => item.Id == id);
+    if (current is null) return Results.NotFound();
+    var nextFileName = $"{id:N}{validation.Extension}";
+    await SaveImageAsync(image, Path.Combine(uploadsDirectory, nextFileName), cancellationToken);
+    if (!string.Equals(current.FileName, nextFileName, StringComparison.OrdinalIgnoreCase))
+        File.Delete(Path.Combine(uploadsDirectory, current.FileName));
+    var updated = await store.UpdateAsync(data =>
+    {
+        var index = data.Images.FindIndex(item => item.Id == id);
+        var next = data.Images[index] with { FileName = nextFileName, Size = image.Length, UploadedAt = DateTimeOffset.UtcNow };
+        data.Images[index] = next;
+        return next;
+    }, cancellationToken);
+    return Results.Ok(ToMediaResponse(updated));
+}).DisableAntiforgery();
+
+mediaAdmin.MapPut("/placements/{placement}", async (string placement, AssignMediaRequest request, MediaLibraryStore store, CancellationToken cancellationToken) =>
+{
+    var assigned = await store.UpdateAsync(library =>
+    {
+        if (request.ImageId is null) { library.Placements.Remove(placement); return true; }
+        if (library.Images.All(image => image.Id != request.ImageId)) return false;
+        library.Placements[placement] = request.ImageId.Value;
+        return true;
+    }, cancellationToken);
+    return assigned ? Results.NoContent() : Results.NotFound();
+});
+
+mediaAdmin.MapDelete("/{id:guid}", async (Guid id, MediaLibraryStore store, CancellationToken cancellationToken) =>
+{
+    var deleted = await store.UpdateAsync(library =>
+    {
+        var image = library.Images.FirstOrDefault(item => item.Id == id);
+        if (image is null) return null;
+        library.Images.Remove(image);
+        foreach (var placement in library.Placements.Where(pair => pair.Value == id).Select(pair => pair.Key).ToList())
+            library.Placements.Remove(placement);
+        return image;
+    }, cancellationToken);
+    if (deleted is null) return Results.NotFound();
+    File.Delete(Path.Combine(uploadsDirectory, deleted.FileName));
+    return Results.NoContent();
+});
+
+app.MapFallbackToFile("/index.html");
+app.Run();
+
+static object ToMediaResponse(MediaItem image) => new
+{
+    image.Id,
+    image.FileName,
+    image.Title,
+    image.AltText,
+    image.Size,
+    image.UploadedAt,
+    url = $"/uploads/{Uri.EscapeDataString(image.FileName)}",
+    placements = Array.Empty<string>()
+};
+
+static async Task<(string? Error, string Extension)> ValidateImageAsync(IFormFile image, CancellationToken cancellationToken)
+{
+    const long maxFileSize = 8 * 1024 * 1024;
+    if (image.Length is 0 or > maxFileSize) return ("Bildet må være mellom 1 byte og 8 MB.", "");
+    var extension = Path.GetExtension(image.FileName).ToLowerInvariant();
+    if (extension is not (".jpg" or ".jpeg" or ".png" or ".webp")) return ("Kun JPG, PNG og WebP er tillatt.", "");
+    await using var input = image.OpenReadStream();
+    var signature = new byte[12];
+    var read = await input.ReadAsync(signature, cancellationToken);
+    var valid = extension switch
+    {
+        ".jpg" or ".jpeg" => read >= 3 && signature[0] == 0xFF && signature[1] == 0xD8 && signature[2] == 0xFF,
+        ".png" => read >= 8 && signature[..8].SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }),
+        ".webp" => read >= 12 && System.Text.Encoding.ASCII.GetString(signature, 0, 4) == "RIFF" && System.Text.Encoding.ASCII.GetString(signature, 8, 4) == "WEBP",
+        _ => false
+    };
+    return valid ? (null, extension) : ("Filen ser ikke ut til å være et gyldig bilde.", "");
+}
+
+static async Task SaveImageAsync(IFormFile image, string path, CancellationToken cancellationToken)
+{
+    await using var input = image.OpenReadStream();
+    await using var output = File.Create(path);
+    await input.CopyToAsync(output, cancellationToken);
+}
+
+static async Task SeedIdentityAsync(IServiceProvider services, IConfiguration configuration)
+{
+    await using var scope = services.CreateAsyncScope();
+    var database = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+    await database.Database.EnsureCreatedAsync();
+
+    var roles = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
+    foreach (var roleName in new[] { "Admin", "Member" })
+        if (!await roles.RoleExistsAsync(roleName))
+            await roles.CreateAsync(new IdentityRole(roleName));
+
+    var email = configuration["AdminSeed:Email"];
+    var password = configuration["AdminSeed:Password"];
+    if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(password)) return;
+
+    var users = scope.ServiceProvider.GetRequiredService<UserManager<IdentityUser>>();
+    var admin = await users.FindByEmailAsync(email);
+    if (admin is null)
+    {
+        admin = new IdentityUser { UserName = email, Email = email, EmailConfirmed = true };
+        var result = await users.CreateAsync(admin, password);
+        if (!result.Succeeded)
+            throw new InvalidOperationException(string.Join("; ", result.Errors.Select(error => error.Description)));
+    }
+    if (!await users.IsInRoleAsync(admin, "Admin")) await users.AddToRoleAsync(admin, "Admin");
+}

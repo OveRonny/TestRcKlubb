@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="RcKlubb.AppHost/RcKlubb.AppHost.csproj" />
+    <Project Path="RcKlubbApp/rcklubbapp.client/rcklubbapp.client.esproj">
+      <Build />
+    </Project>
+    <Project Path="RcKlubbApp/RcKlubbApp.Server/RcKlubbApp.Server.csproj" />
+  </Folder>
+  <Project Path="RcKlubb.ServiceDefaults/RcKlubb.ServiceDefaults.csproj" />
+</Solution>
