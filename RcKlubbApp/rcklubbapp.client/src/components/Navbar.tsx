@@ -24,7 +24,8 @@ export default function Navbar() {
           {links.map(([label, to]) => <NavLink className={linkStyle} end={to === '/'} key={to} to={to}>{label}</NavLink>)}
         </nav>
         <div className="hidden gap-2 lg:flex">
-          <NavLink className="px-3 py-2 text-sm font-semibold text-slate-500 hover:text-orange-400" to="/admin/bilder">Admin</NavLink>
+          <NavLink className="px-3 py-2 text-sm font-semibold text-slate-500 hover:text-orange-400" to="/admin/medlemsoknader">Søknader</NavLink>
+          <NavLink className="px-3 py-2 text-sm font-semibold text-slate-500 hover:text-orange-400" to="/admin/bilder">Bilder</NavLink>
           <NavLink className="px-3 py-2 text-sm font-semibold text-slate-400 hover:text-white" to="/bli-medlem">Bli medlem</NavLink>
           <NavLink className="rounded-md border border-orange-500/50 bg-orange-500/10 px-3.5 py-2 text-sm font-semibold text-orange-400" to="/medlem/login">Logg inn</NavLink>
         </div>
@@ -32,6 +33,7 @@ export default function Navbar() {
       </div>
       {open && <nav className="border-t border-slate-800 bg-[#070b10] px-5 pb-5 lg:hidden">
         {links.map(([label, to]) => <NavLink className="block border-b border-slate-800 py-3.5 text-slate-300" key={to} onClick={() => setOpen(false)} to={to}>{label}</NavLink>)}
+        <NavLink className="block border-b border-slate-800 py-3.5 text-slate-300" onClick={() => setOpen(false)} to="/bli-medlem">Bli medlem</NavLink>
         <NavLink className="mt-4 block rounded-md bg-orange-500 px-4 py-3 text-center font-bold text-black" to="/medlem/login">Logg inn</NavLink>
       </nav>}
     </header>
