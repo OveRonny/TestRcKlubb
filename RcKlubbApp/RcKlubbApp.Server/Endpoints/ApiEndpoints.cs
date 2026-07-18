@@ -1,15 +1,6 @@
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Identity;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
 using RcKlubbApp.Server.Media;
 using RcKlubbApp.Server.Membership;
-using System;
-using System.IO;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace RcKlubbApp.Server.Endpoints
 {
@@ -36,7 +27,9 @@ namespace RcKlubbApp.Server.Endpoints
                 var image = library.Images.FirstOrDefault(item => item.Id == imageId);
                 return image is null ? Results.NotFound() : Results.Ok(new
                 {
-                    image.Id, image.Title, image.AltText,
+                    image.Id,
+                    image.Title,
+                    image.AltText,
                     url = $"/uploads/{Uri.EscapeDataString(image.FileName)}"
                 });
             });
@@ -133,7 +126,12 @@ namespace RcKlubbApp.Server.Endpoints
                 var library = await store.ReadAsync(cancellationToken);
                 return Results.Ok(library.Images.OrderByDescending(image => image.UploadedAt).Select(image => new
                 {
-                    image.Id, image.FileName, image.Title, image.AltText, image.Size, image.UploadedAt,
+                    image.Id,
+                    image.FileName,
+                    image.Title,
+                    image.AltText,
+                    image.Size,
+                    image.UploadedAt,
                     url = $"/uploads/{Uri.EscapeDataString(image.FileName)}",
                     placements = library.Placements.Where(pair => pair.Value == image.Id).Select(pair => pair.Key)
                 }));
@@ -191,7 +189,7 @@ namespace RcKlubbApp.Server.Endpoints
                 var assigned = await store.UpdateAsync(library =>
                 {
                     if (request.ImageId is null) { library.Placements.Remove(placement); return true; }
-                    if (!library.Images.Any(image => image.Id == request.ImageId)) return false;
+                    if (library.Images.All(image => image.Id != request.ImageId)) return false;
                     library.Placements[placement] = request.ImageId.Value;
                     return true;
                 }, cancellationToken);
@@ -217,7 +215,12 @@ namespace RcKlubbApp.Server.Endpoints
 
         private static object ToMediaResponse(MediaItem image) => new
         {
-            image.Id, image.FileName, image.Title, image.AltText, image.Size, image.UploadedAt,
+            image.Id,
+            image.FileName,
+            image.Title,
+            image.AltText,
+            image.Size,
+            image.UploadedAt,
             url = $"/uploads/{Uri.EscapeDataString(image.FileName)}",
             placements = Array.Empty<string>()
         };
